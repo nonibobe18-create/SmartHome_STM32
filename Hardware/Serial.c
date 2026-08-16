@@ -116,12 +116,12 @@ void USART1_IRQHandler(void)
 	
 	
 	// 判断是否为接收寄存器非空RXNE中断（收到1字节数据）
-	if(USART_GetFlagStatus(USART1, USART_IT_RXNE) == SET)
+	if(USART_GetITStatus(USART1, USART_IT_RXNE) == SET)
 	{
 		//读取接收数据寄存器，获取收到的字节
 		rxData = USART_ReceiveData(USART1);
 		
-		if(rxData == 0)
+		if(rxState == 0)
 		{
 			/*
              * 状态0：空闲等待状态，等待帧起始字符 '@'
@@ -151,33 +151,28 @@ void USART1_IRQHandler(void)
 				Serial_RxPacket[packetIndex] = rxData;
 				packetIndex ++;
 			}
+		    else
+			{
+				// 数据包超长，丢弃当前整帧，复位状态机，等待下一次帧头
+				rxState = 0;
+				packetIndex = 0;
+			}
 		}
 		else
 		{
-			// 数据包超长，丢弃当前整帧，复位状态机，等待下一次帧头
+			/* 状态2：已经收到\r，等待帧结束换行符 \n */
+			if(rxData == '\n')
+			{
+				Serial_RxPacket[packetIndex] = '\0';  // 添加C字符串结束符，供sscanf解析使用
+				Serial_RxFlag = 1;                    // 置接收完成标志，通知主循环有完整数据包待处理
+			}
+			
+			// 无论是否正常收到\n，强制复位接收状态机，防止状态机卡死，准备接收下一帧
 			rxState = 0;
 			packetIndex = 0;
 		}
-	}
-	else
-	{
-		/* 状态2：已经收到\r，等待帧结束换行符 \n */
-		if(rxData == '\n')
-		{
-			Serial_RxPacket[packetIndex] = '\0';  // 添加C字符串结束符，供sscanf解析使用
-			Serial_RxFlag = 1;                    // 置接收完成标志，通知主循环有完整数据包待处理
-		}
-		
-		// 无论是否正常收到\n，强制复位接收状态机，防止状态机卡死，准备接收下一帧
-		rxState = 0;
-		packetIndex = 0;
-	}
 	
 	// 手动清除RXNE中断挂起标志位
 	USART_ClearITPendingBit(USART1, USART_IT_RXNE);
+	}
 }
-
-
-
-
-

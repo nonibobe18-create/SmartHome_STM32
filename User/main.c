@@ -10,6 +10,12 @@
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
 
+/* 主循环执行间隔 */
+#define MAIN_LOOP_INTERVAL_MS 10U
+
+/* 连续5秒未收到有效数据，则判定节点离线 */
+#define NODE_OFFLINE_TIMEOUT_MS 5000U
+
 /**
 *@brief  OLED初始化完成后，显示固定不变的文字标签
 *@param  None
@@ -94,37 +100,42 @@ static uint8_t Communication_ParseNodePacket(uint8_t *temperature,
 }
 
 /**
- * @brief  处理51节点上传的一整包接收数据
- * @param  None
- * @retval None
+ * @brief 处理来自51节点的一整包接收数据
+ * @param None
+ * @retval 收到有效数据包返回1，否则返回0
  */
-static void Communication_ProcessReceivePacket(void)
+static uint8_t Communication_ProcessReceivePacket(void)
 {
 	uint8_t temperature;
 	uint8_t huminity;
 	
 	if(Serial_RxFlag == 0)
 	{
-		return;
+		return 0;
 	}
 	
 	if(Communication_ParseNodePacket(&temperature, &huminity) == 1)
 	{
+		/* 使用节点最新数据更新网关显示 */
 		Environment_Update(temperature, huminity);
 		OLED_ShowString(4,1,"NODE:N1 OK      ");
+		
+		/* 允许串口驱动接收下一包数据 */
+		Serial_RxFlag = 0;
+		
+		return 1;
 	}
 	else
 	{
+		/* 接收到无效数据包，显示错误状态 */
 		LED1_ON();
 		OLED_ShowString(3,1,"State:PACKET ERR");
-		OLED_ShowString(4,1,"NODE:N1 OK      ");
+		OLED_ShowString(4,1,"NODE:N1 ERROR   ");
+		
+		Serial_RxFlag = 0;
+		
+		return 0;
 	}
-	
-	/*
-     * 处理完当前数据包之后再清零接收标志
-     * 串口中断可以继续接收下一帧数据
-     */
-	Serial_RxFlag = 0;
 }
 
 /**
@@ -134,20 +145,45 @@ static void Communication_ProcessReceivePacket(void)
  */
 int main(void)
 {
+	
+	uint32_t nodeOfflineTimeMs;
+    uint8_t packetValid;
+	
 	OLED_Init();
 	Serial_Init();
 	LED_Init();
 	
 	Environment_DispalyStaticText();
 	
+	/* 初始为离线状态，直到接收到节点有效数据包 */
+	nodeOfflineTimeMs = NODE_OFFLINE_TIMEOUT_MS;
+
+	
 	while(1)
 	{
-		Communication_ProcessReceivePacket();
-		
-		/*
-         * 主循环短延时保证循环稳定；
-         * 串口接收在中断内独立运行，不受此处延时阻塞。
-         */
-		Delay_ms(10);
+		/* 处理来自51节点的一整包接收数据 */
+    packetValid = Communication_ProcessReceivePacket();
+
+    if (packetValid == 1)
+    {
+        /* 接收到有效数据包后重置计时 */
+        nodeOfflineTimeMs = 0;
+    }
+    else if (nodeOfflineTimeMs < NODE_OFFLINE_TIMEOUT_MS)
+    {
+        /* 未收到有效数据包时，累加计时 */
+        nodeOfflineTimeMs += MAIN_LOOP_INTERVAL_MS;
+    }
+
+    if (nodeOfflineTimeMs >= NODE_OFFLINE_TIMEOUT_MS)
+    {
+        /* 节点离线，关闭报警LED */
+        LED1_OFF();
+
+        OLED_ShowString(3, 1, "State:OFFLINE   ");
+        OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
+    }
+
+    Delay_ms(MAIN_LOOP_INTERVAL_MS);
 	}
 }
