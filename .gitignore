@@ -1,0 +1,15 @@
+Objects/
+Listings/
+DebugConfig/
+
+*.axf
+*.hex
+*.map
+*.lst
+*.o
+*.d
+*.crf
+*.dep
+
+*.uvguix.*
+*.uvoptx
