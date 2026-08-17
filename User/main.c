@@ -64,6 +64,25 @@ static uint8_t Environment_Update(uint8_t temperature, uint8_t humidity)
 }
 
 /**
+ * @brief 根据温度报警状态向51节点发送控制命令。
+ * @param alarmActive 1表示开启报警，0表示关闭报警。
+ * @retval None
+ */
+static void Communication_SendAlarmCommand(uint8_t alarmActive)
+{
+	if(alarmActive == 1)
+	{
+		/* 温度报警时，通知51点亮本地报警LED。 */
+		Serial_SendString("@G1,ALARM=1\r\n");
+	}
+	else
+	{
+		/* 温度正常时，通知51关闭本地报警LED。 */
+		Serial_SendString("@G1,ALARM=0\r\n");
+	}
+}
+
+/**
  * @brief  解析来自N1节点的环境数据包
  * @param  temperature：解析出的温度输出指针
  * @param  humidity：解析出的湿度输出指针
@@ -107,17 +126,22 @@ static uint8_t Communication_ParseNodePacket(uint8_t *temperature,
 static uint8_t Communication_ProcessReceivePacket(void)
 {
 	uint8_t temperature;
-	uint8_t huminity;
+	uint8_t humidity;
+	uint8_t alarmActive;
 	
 	if(Serial_RxFlag == 0)
 	{
 		return 0;
 	}
 	
-	if(Communication_ParseNodePacket(&temperature, &huminity) == 1)
+	if(Communication_ParseNodePacket(&temperature, &humidity) == 1)
 	{
-		/* 使用节点最新数据更新网关显示 */
-		Environment_Update(temperature, huminity);
+		/* 刷新显示，并取得当前温度报警状态。 */
+		alarmActive = Environment_Update(temperature, humidity);
+		
+		/* 将报警状态回传给51节点。 */
+		Communication_SendAlarmCommand(alarmActive);
+		
 		OLED_ShowString(4,1,"NODE:N1 OK      ");
 		
 		/* 允许串口驱动接收下一包数据 */
