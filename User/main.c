@@ -51,13 +51,13 @@ static uint8_t Environment_Update(uint8_t temperature, uint8_t humidity)
 	if(temperature >= TEMPERATURE_ALARM_THRESHOLD)
 	{
 		LED1_ON();
-		OLED_ShowString(3,1,"State:TEMP HIGH");
+		OLED_ShowString(3,1,"State:TEMP HIGH ");
 		alarmActive = 1;
 	}
 	else
 	{
 		LED1_OFF();
-		OLED_ShowString(3,1,"State:NORMAL");
+		OLED_ShowString(3,1,"State:NORMAL    ");
 	}
 	
 	return alarmActive;                  //返回当前报警状态给调用者
@@ -119,6 +119,34 @@ static uint8_t Communication_ParseNodePacket(uint8_t *temperature,
 }
 
 /**
+ * @brief 解析来自N1节点的DHT11错误上报数据包
+ * @param errorCode 指针，用于接收解析得到的DHT11错误码
+ * @retval 1 数据包解析有效；0 数据包格式错误/数值非法
+ */
+static uint8_t Communication_ParseNodeErrorPacket(uint8_t *errorCode)
+{
+	unsigned int parsedErrorCode;
+	int parseResult;
+	
+	//按照格式“N1,ERROR=%u”从接收缓存区提取错误码
+	parseResult = sscanf(Serial_RxPacket,"N1,ERROR=%u",&parsedErrorCode);
+	
+	/*
+     * 判断：sscanf成功解析出1个数据；并且错误码范围1~6
+     * 不满足任意一个，代表报文无效，返回0
+     */
+	if((parseResult != 1) || (parsedErrorCode < 1U) || (parsedErrorCode > 6U))
+	{
+		return 0;
+	}
+	
+	// 将解析出的错误码赋值给外部传入的指针变量
+	*errorCode = (uint8_t)parsedErrorCode;
+	
+	return 1;
+}
+
+/**
  * @brief 处理来自51节点的一整包接收数据
  * @param None
  * @retval 收到有效数据包返回1，否则返回0
@@ -128,6 +156,7 @@ static uint8_t Communication_ProcessReceivePacket(void)
 	uint8_t temperature;
 	uint8_t humidity;
 	uint8_t alarmActive;
+	uint8_t sensorErrorCode;
 	
 	if(Serial_RxFlag == 0)
 	{
@@ -145,6 +174,23 @@ static uint8_t Communication_ProcessReceivePacket(void)
 		OLED_ShowString(4,1,"NODE:N1 OK      ");
 		
 		/* 允许串口驱动接收下一包数据 */
+		Serial_RxFlag = 0;
+		
+		return 1;
+	}
+	else if(Communication_ParseNodeErrorPacket(&sensorErrorCode) == 1)
+	{
+		/* 节点在线，但DHT11传感器读取失败 */
+		LED1_ON();
+		
+		/* 清除远端节点上原有的温度报警 */
+		Communication_SendAlarmCommand(0);
+		
+		OLED_ShowString(3,1,"State:DHT ERR   ");
+		OLED_ShowNum(3,15,sensorErrorCode,1);
+		OLED_ShowString(4,1,"NODE:N1 DHT ERR");
+		
+		
 		Serial_RxFlag = 0;
 		
 		return 1;
