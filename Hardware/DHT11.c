@@ -60,19 +60,22 @@ static uint8_t DHT11_Start(void)
 	
 	DHT11_SetInput();
 	
-	if(DHT11_WaitForLevel(0,100))//收到应答信号
+	/* 等待DHT11拉低数据线，失败表示没有收到起始应答 */
+	if(DHT11_WaitForLevel(0, 100U))
 	{
-		return 1;
+		return 1U;
 	}
-	
-	if(DHT11_WaitForLevel(1,100))
+
+	/* 等待DHT11拉高数据线，失败表示应答时序异常 */
+	if(DHT11_WaitForLevel(1, 100U))
 	{
-		return 1;
+		return 2U;
 	}
-	
-	if(DHT11_WaitForLevel(0,100))
+
+	/* 等待DHT11再次拉低数据线，失败表示应答时序异常 */
+	if(DHT11_WaitForLevel(0, 100U))
 	{
-		return 1;
+		return 3U;
 	}
 	
 	return 0;
@@ -94,9 +97,10 @@ uint8_t DHT11_ReadData(uint8_t *temperature,uint8_t *humidity)
 		
 		for(j = 0;j < 8;j ++)
 		{
-			if(DHT11_WaitForLevel(1,100))
+			/* 等待数据位开始的高电平 */
+			if(DHT11_WaitForLevel(1, 100U))
 			{
-				return 1;
+				return 4U;
 			}
 			
 			Delay_us(40);
@@ -108,20 +112,21 @@ uint8_t DHT11_ReadData(uint8_t *temperature,uint8_t *humidity)
 				data[i] |= 1;
 			}
 			
-			if(DHT11_WaitForLevel(0,100))
+			/* 等待当前数据位结束的低电平 */
+			if(DHT11_WaitForLevel(0, 100U))
 			{
-				return 1;
+				return 5U;
 			}
 		}
 	}
 	
 	if((uint8_t)(data[0] +  data[1] + data[2] + data[3]) != data[4])
 	{
-		return 1;
+		return 6U;
 	}
 	
 	*humidity = data[0];
     *temperature = data[2];
 	
-	return 0;
+	return 0U;
 }

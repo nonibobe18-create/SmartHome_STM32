@@ -18,6 +18,9 @@
 /* 连续5秒未收到有效数据，则判定节点离线 */
 #define NODE_OFFLINE_TIMEOUT_MS 5000U
 
+/* 本地DHT11读取周期 */
+#define LOCAL_DHT11_READ_INTERVAL_MS 2000U
+
 /**
  * @brief 计算载荷字符串的XOR校验和
  * @param text 不带帧头、校验字段的原始载荷字符串
@@ -100,7 +103,8 @@ static void Environment_DispalyStaticText(void)
 	OLED_ShowString(2,1,"Humi:");
 	OLED_ShowString(2,12,"L:");
     OLED_ShowString(3,1,"State:WAIT NODE");
-    OLED_ShowString(4,1,"NODE:N1 WAIT");	
+//    OLED_ShowString(4,1,"NODE:N1 WAIT");	
+	OLED_ShowString(4,1,"LOCAL DHT WAIT  ");
 }
 
 /**
@@ -252,7 +256,7 @@ static uint8_t Communication_ProcessReceivePacket(void)
 		/* 将报警状态回传给51节点。 */
 		Communication_SendAlarmCommand(alarmActive);
 		
-		OLED_ShowString(4,1,"NODE:N1 OK      ");
+//		OLED_ShowString(4,1,"NODE:N1 OK      ");
 		
 		/* 允许串口驱动接收下一包数据 */
 		Serial_RxFlag = 0;
@@ -269,7 +273,7 @@ static uint8_t Communication_ProcessReceivePacket(void)
 		
 		OLED_ShowString(3,1,"State:DHT ERR   ");
 		OLED_ShowNum(3,15,sensorErrorCode,1);
-		OLED_ShowString(4,1,"NODE:N1 DHT ERR");
+//		OLED_ShowString(4,1,"NODE:N1 DHT ERR");
 		
 		
 		Serial_RxFlag = 0;
@@ -281,7 +285,7 @@ static uint8_t Communication_ProcessReceivePacket(void)
 		/* 接收到无效数据包，显示错误状态 */
 		LED1_ON();
 		OLED_ShowString(3,1,"State:PACKET ERR");
-		OLED_ShowString(4,1,"NODE:N1 ERROR   ");
+//		OLED_ShowString(4,1,"NODE:N1 ERROR   ");
 		
 		Serial_RxFlag = 0;
 		
@@ -303,12 +307,25 @@ int main(void)
 	uint32_t lightDisplayTimeMs;
     uint8_t lightPercent;
 	
+	/* 本地DHT11采集变量 */
+	uint32_t localDhtReadTimeMs;
+	uint8_t localTemperature;
+	uint8_t localHumidity;
+	uint8_t localDhtErrorCode;
+	
 	LightSensor_Init();
 	OLED_Init();
 	Serial_Init();
 	LED_Init();
+	DHT11_Init();
 	
 	lightDisplayTimeMs = 100U;
+	
+	/* 让主循环启动后立即读取一次本地DHT11 */
+	localDhtReadTimeMs = LOCAL_DHT11_READ_INTERVAL_MS;
+	localTemperature = 0U;
+	localHumidity = 0U;
+	localDhtErrorCode = 0U;
 	
 	Environment_DispalyStaticText();
 	
@@ -338,7 +355,38 @@ int main(void)
 			LED1_OFF();
 
 			OLED_ShowString(3, 1, "State:OFFLINE   ");
-			OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
+//			OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
+		}
+		
+		/* 定时读取本地DHT11，并临时显示在OLED第4行 */
+		if(localDhtReadTimeMs >= LOCAL_DHT11_READ_INTERVAL_MS)
+		{
+			localDhtReadTimeMs = 0U;
+			
+			// 读取本地DHT11，保存错误码，0=成功，非0代表不同类型故障
+			localDhtErrorCode = DHT11_ReadData(&localTemperature, &localHumidity);
+			
+			if(localDhtErrorCode == 0U)
+			{
+				// 读取成功：第4行显示本地温湿度
+				OLED_ShowString(4, 1, "LOCAL T:");
+				OLED_ShowNum(4, 9, localTemperature, 2);
+				OLED_ShowString(4, 11, " H:");
+				OLED_ShowNum(4, 14, localHumidity, 2);
+			}
+			else
+			{
+				/* 先清空整行，避免残留字符覆盖错误码 */
+				OLED_ShowString(4, 1, "                ");
+				
+				// 读取失败：显示错误代号，同时用空格清除右侧旧湿度数字残留
+				OLED_ShowString(4, 1, "LOCAL ERR:");
+				OLED_ShowNum(4, 12, localDhtErrorCode, 1);
+			}
+		}
+		else
+		{
+			localDhtReadTimeMs += MAIN_LOOP_INTERVAL_MS;
 		}
 		
 		if(lightDisplayTimeMs >= 100U)// 定时100ms更新一次光照百分比显示，避免频繁读取ADC和刷屏
