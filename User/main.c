@@ -1,12 +1,13 @@
 #include "stm32f10x.h"                  // Device header
+#include <string.h>
+#include <stdio.h>
 #include "delay.h"
 #include "OLED.h"
 #include "Serial.h"
 #include "Key.h"
-#include <string.h>
 #include "LED.h"
 #include "DHT11.h"
-#include <stdio.h>
+#include "LightSensor.h"
 
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
@@ -97,6 +98,7 @@ static void Environment_DispalyStaticText(void)
 	
 	OLED_ShowString(1,1,"Temp:");         
 	OLED_ShowString(2,1,"Humi:");
+	OLED_ShowString(2,12,"L:");
     OLED_ShowString(3,1,"State:WAIT NODE");
     OLED_ShowString(4,1,"NODE:N1 WAIT");	
 }
@@ -298,9 +300,15 @@ int main(void)
 	uint32_t nodeOfflineTimeMs;
     uint8_t packetValid;
 	
+	uint32_t lightDisplayTimeMs;
+    uint8_t lightPercent;
+	
+	LightSensor_Init();
 	OLED_Init();
 	Serial_Init();
 	LED_Init();
+	
+	lightDisplayTimeMs = 100U;
 	
 	Environment_DispalyStaticText();
 	
@@ -310,29 +318,44 @@ int main(void)
 	
 	while(1)
 	{
-		/* 处理来自51节点的一整包接收数据 */
-    packetValid = Communication_ProcessReceivePacket();
+			/* 处理来自51节点的一整包接收数据 */
+		packetValid = Communication_ProcessReceivePacket();
 
-    if (packetValid == 1)
-    {
-        /* 接收到有效数据包后重置计时 */
-        nodeOfflineTimeMs = 0;
-    }
-    else if (nodeOfflineTimeMs < NODE_OFFLINE_TIMEOUT_MS)
-    {
-        /* 未收到有效数据包时，累加计时 */
-        nodeOfflineTimeMs += MAIN_LOOP_INTERVAL_MS;
-    }
+		if (packetValid == 1)
+		{
+			/* 接收到有效数据包后重置计时 */
+			nodeOfflineTimeMs = 0;
+		}
+		else if (nodeOfflineTimeMs < NODE_OFFLINE_TIMEOUT_MS)
+		{
+			/* 未收到有效数据包时，累加计时 */
+			nodeOfflineTimeMs += MAIN_LOOP_INTERVAL_MS;
+		}
 
-    if (nodeOfflineTimeMs >= NODE_OFFLINE_TIMEOUT_MS)
-    {
-        /* 节点离线，关闭报警LED */
-        LED1_OFF();
+		if (nodeOfflineTimeMs >= NODE_OFFLINE_TIMEOUT_MS)
+		{
+			/* 节点离线，关闭报警LED */
+			LED1_OFF();
 
-        OLED_ShowString(3, 1, "State:OFFLINE   ");
-        OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
-    }
-
-    Delay_ms(MAIN_LOOP_INTERVAL_MS);
+			OLED_ShowString(3, 1, "State:OFFLINE   ");
+			OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
+		}
+		
+		if(lightDisplayTimeMs >= 100U)// 定时100ms更新一次光照百分比显示，避免频繁读取ADC和刷屏
+		{
+			// 读取光照传感器换算后的百分比(0‑100)
+			lightPercent = LightSensor_ReadPercent();
+			// OLED第2行，第14列，显示3位数字光照百分比
+			OLED_ShowNum(2,14,lightPercent,3);
+			//计时清零，重新开始计时
+			lightDisplayTimeMs = 0;
+		}
+		else
+		{
+			//主循环周期累加时间
+			lightDisplayTimeMs += MAIN_LOOP_INTERVAL_MS;
+		}
+		
+		Delay_ms(MAIN_LOOP_INTERVAL_MS);
 	}
 }
