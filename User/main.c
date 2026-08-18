@@ -6,6 +6,7 @@
 #include "Serial.h"
 #include "Key.h"
 #include "LED.h"
+#include "Buzzer.h"
 #include "DHT11.h"
 #include "LightSensor.h"
 
@@ -127,12 +128,14 @@ static uint8_t Environment_Update(uint8_t temperature, uint8_t humidity)
 	if(temperature >= TEMPERATURE_ALARM_THRESHOLD)
 	{
 		LED1_ON();
+		Buzzer_On();
 		OLED_ShowString(3,1,"State:TEMP HIGH ");
-		alarmActive = 1;
+		alarmActive = 1U;
 	}
 	else
 	{
 		LED1_OFF();
+		Buzzer_Off();
 		OLED_ShowString(3,1,"State:NORMAL    ");
 	}
 	
@@ -267,6 +270,7 @@ static uint8_t Communication_ProcessReceivePacket(void)
 	{
 		/* 节点在线，但DHT11传感器读取失败 */
 		LED1_ON();
+		Buzzer_On();
 		
 		/* 清除远端节点上原有的温度报警 */
 		Communication_SendAlarmCommand(0);
@@ -284,6 +288,7 @@ static uint8_t Communication_ProcessReceivePacket(void)
 	{
 		/* 接收到无效数据包，显示错误状态 */
 		LED1_ON();
+		Buzzer_On();
 		OLED_ShowString(3,1,"State:PACKET ERR");
 //		OLED_ShowString(4,1,"NODE:N1 ERROR   ");
 		
@@ -317,6 +322,7 @@ int main(void)
 	OLED_Init();
 	Serial_Init();
 	LED_Init();
+	Buzzer_Init();
 	DHT11_Init();
 	
 	lightDisplayTimeMs = 100U;
@@ -353,6 +359,7 @@ int main(void)
 		{
 			/* 节点离线，关闭报警LED */
 			LED1_OFF();
+			Buzzer_Off();
 
 			OLED_ShowString(3, 1, "State:OFFLINE   ");
 //			OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
