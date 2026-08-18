@@ -6,6 +6,7 @@
 #include <string.h>
 #include "LED.h"
 #include "DHT11.h"
+#include <stdio.h>
 
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
@@ -16,6 +17,75 @@
 /* 连续5秒未收到有效数据，则判定节点离线 */
 #define NODE_OFFLINE_TIMEOUT_MS 5000U
 
+/**
+ * @brief 计算载荷字符串的XOR校验和
+ * @param text 不带帧头、校验字段的原始载荷字符串
+ * @retval 1字节XOR校验结果
+ */
+static uint8_t Communication_CalculateChecksum(const char *text)
+{
+ uint8_t checksum;
+ uint16_t index;
+ 
+ checksum = 0;
+ index = 0;
+ 
+ // 遍历直到字符串结束符'\0'
+ while(text[index] != '\0')
+ {
+	 checksum ^= (uint8_t)text[index];
+	 index ++;
+ }
+ 
+ return checksum;
+}
+
+/**
+* @brief 对接收报文计算校验：只计算 ,C= 之前的载荷部分
+* @param packet 已剥离@、\r\n的完整接收报文（包含,C=xxx）
+* @retval 载荷部分XOR校验和
+*/
+static uint8_t Communication_CalculatePacketChecksum(const char*packet)
+{
+ uint8_t checksum;
+ uint16_t index;
+ 
+ checksum = 0;
+ index = 0;
+ 
+ while(packet[index] != '\0')
+ {
+	 // 检测到 ",C=" 标记，停止计算，后面是校验域不再参与运算
+	 if((packet[index] == ',' ) && (packet[index + 1] == 'C') && packet[index + 2] == '=')
+	 {
+		 break;
+	 }
+	 
+	 checksum ^= (uint8_t)packet[index];
+	 index ++;
+ }
+ 
+ return checksum;
+}
+ 
+/**
+* @brief 输入原始载荷，自动添加帧头、校验、帧尾并串口发送
+* @param payload 业务载荷字符串，不含@、,C=xx、\r\n
+* @retval None
+*/
+static void Communication_SendPayloadwithChecksum(const char *payload)
+{
+ uint8_t checksum;
+ char frame[32];
+ 
+ checksum = Communication_CalculateChecksum(payload);
+ 
+ // 组装完整帧：@载荷,C=校验\r\n
+ sprintf(frame,"@%s,C=%u\r\n",payload,(unsigned int)checksum);
+ 
+ Serial_SendString(frame);
+}
+ 
 /**
 *@brief  OLED初始化完成后，显示固定不变的文字标签
 *@param  None
@@ -70,16 +140,11 @@ static uint8_t Environment_Update(uint8_t temperature, uint8_t humidity)
  */
 static void Communication_SendAlarmCommand(uint8_t alarmActive)
 {
-	if(alarmActive == 1)
-	{
-		/* 温度报警时，通知51点亮本地报警LED。 */
-		Serial_SendString("@G1,ALARM=1\r\n");
-	}
-	else
-	{
-		/* 温度正常时，通知51关闭本地报警LED。 */
-		Serial_SendString("@G1,ALARM=0\r\n");
-	}
+	char payload[16];
+	
+	sprintf(payload,"G1,ALARM=%u",(unsigned int)alarmActive);
+	
+	Communication_SendPayloadwithChecksum(payload);
 }
 
 /**
@@ -93,15 +158,19 @@ static uint8_t Communication_ParseNodePacket(uint8_t *temperature,
 {
 	unsigned int parsedTemperature;
 	unsigned int parsedHumidity;
+	unsigned int parsedChecksum;
 	int parseResult;
 	
 	/*
      * Serial_RxPacket已经由串口驱动过滤掉@、\r、\n
      * 收到有效报文格式： N1,T=31,H=45
      */
-	parseResult = sscanf(Serial_RxPacket, "N1,T=%u,H=%u", &parsedTemperature, &parsedHumidity);
+	parseResult = sscanf(Serial_RxPacket, "N1,T=%u,H=%u,C=%u", &parsedTemperature, &parsedHumidity, &parsedChecksum);
 	
-	if(parseResult != 2)
+	if((parseResult != 3) ||
+		(parsedChecksum > 255U) ||
+	    (Communication_CalculatePacketChecksum(Serial_RxPacket) !=
+	     (uint8_t)parsedChecksum))
 	{
 		return 0;
 	}
@@ -126,18 +195,28 @@ static uint8_t Communication_ParseNodePacket(uint8_t *temperature,
 static uint8_t Communication_ParseNodeErrorPacket(uint8_t *errorCode)
 {
 	unsigned int parsedErrorCode;
+	unsigned int parsedChecksum;
 	int parseResult;
 	
 	//按照格式“N1,ERROR=%u”从接收缓存区提取错误码
-	parseResult = sscanf(Serial_RxPacket,"N1,ERROR=%u",&parsedErrorCode);
+	parseResult = sscanf(Serial_RxPacket,"N1,ERROR=%u,C=%u",&parsedErrorCode,&parsedChecksum);
 	
 	/*
-     * 判断：sscanf成功解析出1个数据；并且错误码范围1~6
-     * 不满足任意一个，代表报文无效，返回0
-     */
-	if((parseResult != 1) || (parsedErrorCode < 1U) || (parsedErrorCode > 6U))
+ * 合法性校验条件，任意一条满足则报文无效，返回0
+ * 1.parseResult !=2：sscanf未能成功读出2个字段，报文格式错误
+ * 2.parsedErrorCode <1U：错误码小于1，不在定义范围
+ * 3.parsedErrorCode >6U：错误码大于6，超出业务规定的错误编号(1~6)
+ * 4.parsedChecksum >255U：XOR校验是8位，不能超过0‑255
+ * 5.本地重新计算报文,C=之前载荷的XOR校验，和接收校验值比对不相等，说明传输出错
+ */
+	if((parseResult != 2) ||
+		(parsedErrorCode < 1U) ||
+     	(parsedErrorCode > 6U) ||
+	    (parsedChecksum > 255U) ||
+	    (Communication_CalculatePacketChecksum(Serial_RxPacket) !=
+	    (uint8_t)parsedChecksum))
 	{
-		return 0;
+		return 0;// 报文校验失败，返回0代表处理失败
 	}
 	
 	// 将解析出的错误码赋值给外部传入的指针变量
