@@ -755,6 +755,11 @@
               <FileType>5</FileType>
               <FilePath>.\Hardware\ESP8266.h</FilePath>
             </File>
+            <File>
+              <FileName>WiFiConfig.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\WiFiConfig.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

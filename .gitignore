@@ -13,3 +13,6 @@ DebugConfig/
 
 *.uvguix.*
 *.uvoptx
+
+# WiFi账号密码，不提交到GitHub
+Hardware/WiFiConfig.h
