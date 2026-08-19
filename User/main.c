@@ -9,6 +9,7 @@
 #include "Buzzer.h"
 #include "DHT11.h"
 #include "LightSensor.h"
+#include "ESP8266.h"
 
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
@@ -318,9 +319,12 @@ int main(void)
 	uint8_t localHumidity;
 	uint8_t localDhtErrorCode;
 	
+	uint8_t esp8266Status;
+	
 	LightSensor_Init();
 	OLED_Init();
 	Serial_Init();
+	ESP8266_Init();
 	LED_Init();
 	Buzzer_Init();
 	DHT11_Init();
@@ -334,6 +338,20 @@ int main(void)
 	localDhtErrorCode = 0U;
 	
 	Environment_DispalyStaticText();
+	
+	/* 测试STM32与ESP8266之间的USART2通信 */
+	esp8266Status = ESP8266_TestConnection(3000U);
+	
+	if(esp8266Status == 1U)
+	{
+		// 收到OK应答，ESP8266通信正常；末尾空格覆盖屏幕旧残留内容
+		OLED_ShowString(4,1,"WIFI:OK          ");
+	}
+	else
+	{
+		// 3000ms超时未收到OK，接线/模块上电/波特率异常
+		OLED_ShowString(4,1,"WIFI:ERR         ");
+	}
 	
 	/* 初始为离线状态，直到接收到节点有效数据包 */
 	nodeOfflineTimeMs = NODE_OFFLINE_TIMEOUT_MS;
