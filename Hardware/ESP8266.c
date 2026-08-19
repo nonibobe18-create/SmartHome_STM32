@@ -3,6 +3,11 @@
 #include "Delay.h"
 #include <stdio.h>
 #include "WiFiConfig.h"
+#include <string.h>
+#include "NetworkConfig.h"
+
+static void ESP8266_ClearReceiveData(void);
+static unsigned char ESP8266_waitResponse(const char *response,unsigned long timeout_ms);
 
 /**
  * @brief 初始化ESP8266使用的USART2
@@ -68,58 +73,15 @@ void ESP8266_SendString(const char *string)
 
 /**
  * @brief 发送AT命令并等待ESP8266返回OK
- * @param timeout_ms 最大等待时间，单位为毫秒
- * @retval 1：收到OK；0：超时未收到OK
+ * @param timeout_ms 最大空闲等待时间，单位为毫秒
+ * @retval 1U：收到OK；0U：超时未收到OK
  */
 unsigned char ESP8266_TestConnection(unsigned long timeout_ms)
 {
-	unsigned long elapsed_ms;
-	unsigned char rxData;
-	unsigned char receiveState;
-	
-	elapsed_ms = 0U;
-	receiveState = 0U;
-	
-	/* 清除发送测试命令前残留的接收数据 */
-	while(USART_GetFlagStatus(USART2,USART_FLAG_RXNE) == SET)
-	{
-		USART_ReceiveData(USART2);
-	}
-	
-	/* 发送AT测试指令 AT\r\n */
+	ESP8266_ClearReceiveData();
 	ESP8266_SendString("AT\r\n");
 	
-	/* 阻塞循环，在超时时间内轮询接收寄存器 */
-	while(elapsed_ms < timeout_ms)
-	{
-		if(USART_GetFlagStatus(USART2,USART_FLAG_RXNE) == SET)
-		{
-			rxData = (unsigned char)USART_ReceiveData(USART2);
-			
-			/* 状态机匹配 "OK" */
-			if((receiveState == 0U) && (rxData == 'O'))
-			{
-				receiveState = 1U;    // 收到'O'，等待下一个'K'
-			}
-			else if((receiveState == 1U) && (rxData == 'K'))
-			{
-				return 1U;            // O后面紧跟K，匹配OK，连接正常
-			}
-			else if(rxData == 'O')
-			{
-				receiveState = 1U;   // 中途乱码，重新捕获O
-			}
-			else
-			{
-				receiveState = 0U;   // 收到其他字符，状态重置
-			}
-		}
-		
-		Delay_ms(1U);  // 1ms延时
-		elapsed_ms ++; // 计时累加
-	}
-	
-	return 0U;         // 超时退出，未收到OK
+	return ESP8266_waitResponse("OK",timeout_ms);
 }
 
 /**
@@ -136,53 +98,76 @@ static void ESP8266_ClearReceiveData(void)
 }
 
 /**
- * @brief 阻塞等待ESP8266返回目标应答字符串，状态机逐字符匹配
- * @param response 期望接收的应答字符串(以'\0'结尾)
+ * @brief 阻塞等待ESP8266返回目标应答字符串
+ * @param response 期望接收的应答字符串，以'\0'结尾
  * @param timeout_ms 最大等待时间，单位为毫秒
- * @retval 1U：完整匹配到目标字符串；0U：超时未匹配
+ * @retval 1U：完整匹配到目标字符串；0U：达到超时
  */
 static unsigned char ESP8266_waitResponse(const char *response,unsigned long timeout_ms)
 {
-	unsigned long elapsed_ms;
-	unsigned char rxData;
-	unsigned char responseIndex;
+    unsigned long elapsed_us;
+    unsigned char rxData;
+    unsigned char responseIndex;
+
+    elapsed_us = 0U;
+    responseIndex = 0U;
+
+    while(elapsed_us < (timeout_ms * 1000UL))
+    {
+        if(USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET)
+        {
+            rxData = (unsigned char)USART_ReceiveData(USART2);
+
+            if(rxData == (unsigned char)response[responseIndex])
+            {
+                responseIndex++;
+
+                if(response[responseIndex] == '\0')
+                {
+                    return 1U;
+                }
+            }
+            else if(rxData == (unsigned char)response[0])
+            {
+                responseIndex = 1U;
+            }
+            else
+            {
+                responseIndex = 0U;
+            }
+        }
+
+        /*
+         * 100us轮询一次，远小于9600波特率的单字节传输时间，
+         * 同时保证timeout_ms仍是实际毫秒数。
+         */
+        Delay_us(100U);
+        elapsed_us += 100U;
+    }
+
+    return 0U;
+}
+
+/**
+ * @brief 通过AT+RST复位ESP8266并等待模块启动完成
+ * @param None
+ * @retval 1：模块复位并启动成功；0：超时未收到ready
+ */
+unsigned char ESP8266_Reset(void)
+{
+	ESP8266_ClearReceiveData();
 	
-	elapsed_ms = 0U;
-	responseIndex = 0U;
+	ESP8266_SendString("AT+RST\r\n");
 	
-	while(elapsed_ms < timeout_ms)
+	if(ESP8266_waitResponse("ready",5000U) == 0U)
 	{
-		if(USART_GetFlagStatus(USART2,USART_FLAG_RXNE) == SET)
-		{
-			rxData = (unsigned char)USART_ReceiveData(USART2);
-			
-			// 当前字符和期待字符匹配，索引后移
-			if(rxData == (unsigned char)response[responseIndex])
-			{
-				responseIndex ++;
-				// 读到字符串结束符，代表完整匹配成功
-				if(response[responseIndex] == '\0')
-				{
-					return 1U;
-				}
-			}
-			// 收到目标串首字符，重置索引从第2位开始匹配（处理中途乱码）
-			else if(rxData == (unsigned char)response[0])
-			{
-				responseIndex = 1U;
-			}
-			// 字符不匹配，匹配状态清零，从头开始
-			else
-			{
-				responseIndex = 0U;
-			}
-		}
-		
-		Delay_ms(1U);
-		elapsed_ms ++;
+		return 0U;
 	}
 	
-	return 0U;// 超时退出，未收到目标应答
+	/* 模块输出ready后仍需要一点时间恢复串口和网络功能 */
+	Delay_ms(5000U);
+	
+	return 1U;
 }
 
 /**
@@ -212,12 +197,106 @@ unsigned char ESP8266_ConnectWiFi(void)
 	ESP8266_ClearReceiveData();
 	ESP8266_SendString(command);
 	
-	// WiFi连接耗时较长，超时设置20秒；未收到OK则返回3
-	if(ESP8266_waitResponse("OK",20000U) == 0U)
+	// WiFi连接耗时较长，超时设置40秒；未收到OK则返回3
+	if(ESP8266_waitResponse("OK",40000U) == 0U)
 	{
 		return 3U;
 	}
 	
+	return 1U;
+}
+
+/**
+ * @brief 连接指定TCP服务器
+ * @param server_ip TCP服务器IPv4地址
+ * @param server_port TCP服务器端口
+ * @retval 1：连接成功；0：连接失败
+ */
+unsigned char ESP8266_ConnectTcpServer(const char *server_ip,unsigned int server_port)
+{
+	char command[96];
+	
+	/*
+	 * 关闭可能残留的旧TCP会话。
+	 * 未连接时返回ERROR是正常现象，因此不检查该命令的回执。
+	 */
+	ESP8266_ClearReceiveData();
+	ESP8266_SendString("AT+CIPCLOSE\r\n");
+	Delay_ms(300U);
+	ESP8266_ClearReceiveData();
+	
+	/* 设置普通TCP模式，并立即等待该命令的OK响应。 */
+	ESP8266_SendString("AT+CIPMODE=0\r\n");
+	
+	if(ESP8266_waitResponse("OK",3000U) == 0U)
+	{
+		return 0U;
+	}
+	
+	/* CIPMUX=0：单连接模式，只允许1路TCP连接 */
+	ESP8266_SendString("AT+CIPMUX=0\r\n");
+	if(ESP8266_waitResponse("OK",3000U) == 0U)
+	{
+		return 0U;
+	}
+	
+	/* 发起TCP连接 AT+CIPSTART="TCP","ip",port */
+	sprintf(command,"AT+CIPSTART=\"TCP\",\"%s\",%u\r\n",server_ip,server_port);
+	
+	ESP8266_ClearReceiveData();
+	ESP8266_SendString(command);
+	
+	/* 收到CONNECT表示TCP连接已经真正建立 */
+	if(ESP8266_waitResponse("CONNECT",8000U) == 0U)
+	{
+		return 0U;
+	}
+	
+	return 1U;
+}
+
+/**
+ * @brief CIPMODE=0模式下通过TCP发送字符串数据
+ * @param data 待发送的'\0'结尾字符串
+ * @retval 1U：收到发送提示符并发送数据；0U：未收到发送提示符
+ */
+unsigned char ESP8266_SendTcpData(const char *data)
+{
+	char command[32];
+	unsigned int dataLength;
+	
+	dataLength = (unsigned int)strlen(data);
+		
+	/*
+	 * 当前测试报文必须包含完整的回车换行，
+	 * 长度由strlen自动计算，不能手写固定长度。
+	 */
+	sprintf(command,"AT+CIPSEND=%u\r\n",dataLength);
+	
+	ESP8266_ClearReceiveData();
+	ESP8266_SendString(command);
+	
+	/*
+	 * 等待ESP8266返回发送提示符。
+	 * 收到提示符后稍作等待，确保模块已经进入数据发送状态。
+	 */
+	if(ESP8266_waitResponse(">",5000U) == 0U)
+	{
+		return 0U;
+	}
+	
+	Delay_ms(100U);
+	
+	/*
+	 * ESP8266已经返回'>'提示符，
+	 * 表示模块已经进入数据接收状态。
+	 */
+	ESP8266_SendString(data);
+	
+	/*
+	 * 以收到'>'并发送完整数据作为本次发送成功条件。
+	 * NetAssist收到数据用于验证端到端通信。
+	 */
 	return 1U;
 }
 
