@@ -1,6 +1,8 @@
 #include "stm32f10x.h"                  // Device header
 #include "ESP8266.h"
 #include "Delay.h"
+#include <stdio.h>
+#include "WiFiConfig.h"
 
 /**
  * @brief 初始化ESP8266使用的USART2
@@ -119,3 +121,103 @@ unsigned char ESP8266_TestConnection(unsigned long timeout_ms)
 	
 	return 0U;         // 超时退出，未收到OK
 }
+
+/**
+ * @brief 清空USART2接收寄存器，丢弃未读取的残留字节
+ * @param None
+ * @retval None
+ */
+static void ESP8266_ClearReceiveData(void)
+{
+	while(USART_GetFlagStatus(USART2,USART_FLAG_RXNE) == SET)
+	{
+		USART_ReceiveData(USART2);
+	}
+}
+
+/**
+ * @brief 阻塞等待ESP8266返回目标应答字符串，状态机逐字符匹配
+ * @param response 期望接收的应答字符串(以'\0'结尾)
+ * @param timeout_ms 最大等待时间，单位为毫秒
+ * @retval 1U：完整匹配到目标字符串；0U：超时未匹配
+ */
+static unsigned char ESP8266_waitResponse(const char *response,unsigned long timeout_ms)
+{
+	unsigned long elapsed_ms;
+	unsigned char rxData;
+	unsigned char responseIndex;
+	
+	elapsed_ms = 0U;
+	responseIndex = 0U;
+	
+	while(elapsed_ms < timeout_ms)
+	{
+		if(USART_GetFlagStatus(USART2,USART_FLAG_RXNE) == SET)
+		{
+			rxData = (unsigned char)USART_ReceiveData(USART2);
+			
+			// 当前字符和期待字符匹配，索引后移
+			if(rxData == (unsigned char)response[responseIndex])
+			{
+				responseIndex ++;
+				// 读到字符串结束符，代表完整匹配成功
+				if(response[responseIndex] == '\0')
+				{
+					return 1U;
+				}
+			}
+			// 收到目标串首字符，重置索引从第2位开始匹配（处理中途乱码）
+			else if(rxData == (unsigned char)response[0])
+			{
+				responseIndex = 1U;
+			}
+			// 字符不匹配，匹配状态清零，从头开始
+			else
+			{
+				responseIndex = 0U;
+			}
+		}
+		
+		Delay_ms(1U);
+		elapsed_ms ++;
+	}
+	
+	return 0U;// 超时退出，未收到目标应答
+}
+
+/**
+ * @brief 配置ESP8266为Station模式，执行连接WiFi操作
+ * @param None
+ * @retval 1U：WiFi连接全部成功
+ * @retval 2U：Station模式设置失败
+ * @retval 3U：WiFi账号密码连接失败/超时
+ */
+unsigned char ESP8266_ConnectWiFi(void)
+{
+	char command[96];
+	
+	// AT+CWMODE=1 设置为STA模式；返回OK或者no change（已经是STA模式）都算成功
+	ESP8266_ClearReceiveData();
+	ESP8266_SendString("AT+CWMODE=1\r\n");
+	
+	// OK / no change 任意一个应答出现即判定模式配置成功，两个都没收到返回2
+	if((ESP8266_waitResponse("OK",3000U) == 0U) && (ESP8266_waitResponse("no change",1000U) == 0U))
+	{
+		return 2U;
+	}
+	
+	// 拼接AT+CWJAP连接WiFi指令，填入SSID和密码宏
+	sprintf(command,"AT+CWJAP=\"%s\",\"%s\"\r\n",WIFI_SSID,WIFI_PASSWORD);
+	
+	ESP8266_ClearReceiveData();
+	ESP8266_SendString(command);
+	
+	// WiFi连接耗时较长，超时设置20秒；未收到OK则返回3
+	if(ESP8266_waitResponse("OK",20000U) == 0U)
+	{
+		return 3U;
+	}
+	
+	return 1U;
+}
+

@@ -320,6 +320,7 @@ int main(void)
 	uint8_t localDhtErrorCode;
 	
 	uint8_t esp8266Status;
+	uint8_t wifiConnectStatus;
 	
 	LightSensor_Init();
 	OLED_Init();
@@ -331,8 +332,11 @@ int main(void)
 	
 	lightDisplayTimeMs = 100U;
 	
-	/* 让主循环启动后立即读取一次本地DHT11 */
-	localDhtReadTimeMs = LOCAL_DHT11_READ_INTERVAL_MS;
+	/*
+	 * WiFi启动状态需要先保持显示，
+	 * 本地DHT11在进入主循环约2秒后首次读取。
+	 */
+	localDhtReadTimeMs = 0U;
 	localTemperature = 0U;
 	localHumidity = 0U;
 	localDhtErrorCode = 0U;
@@ -344,18 +348,36 @@ int main(void)
 	
 	if(esp8266Status == 1U)
 	{
-		// 收到OK应答，ESP8266通信正常；末尾空格覆盖屏幕旧残留内容
-		OLED_ShowString(4,1,"WIFI:OK          ");
+		wifiConnectStatus = ESP8266_ConnectWiFi();
 	}
 	else
 	{
-		// 3000ms超时未收到OK，接线/模块上电/波特率异常
-		OLED_ShowString(4,1,"WIFI:ERR         ");
+		wifiConnectStatus = 0U;
+	}
+	
+	/*
+	 * 仅在启动时显示WiFi连接结果。
+	 * 约2秒后，第4行会由本地DHT11显示覆盖。
+	 */
+	if(wifiConnectStatus == 1U)
+	{
+		OLED_ShowString(4,1,"WIFI JOIN OK    ");
+	}
+	else if(wifiConnectStatus == 2U)
+	{
+		OLED_ShowString(4,1,"WIFI MODE ERR   ");
+	}
+	else if(wifiConnectStatus == 3U)
+	{
+		OLED_ShowString(4,1,"WIFI JOIN ERR   ");
+	}
+	else
+	{
+		OLED_ShowString(4,1,"WIFI AT ERR     ");
 	}
 	
 	/* 初始为离线状态，直到接收到节点有效数据包 */
 	nodeOfflineTimeMs = NODE_OFFLINE_TIMEOUT_MS;
-
 	
 	while(1)
 	{
