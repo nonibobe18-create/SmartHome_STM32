@@ -11,6 +11,8 @@
 #include "LightSensor.h"
 #include "ESP8266.h"
 #include "NetworkConfig.h"
+#include "stm32f10x_tim.h"
+#include "misc.h"
 
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
@@ -24,11 +26,63 @@
 /* 本地DHT11读取周期 */
 #define LOCAL_DHT11_READ_INTERVAL_MS 2000U
 
+/* 本地环境数据TCP上报周期 */
+#define TCP_ENVIRONMENT_REPORT_INTERVAL_MS 5000U
+
 /* TCP服务器连接失败后的最大重试次数 */
 #define ESP8266_TCP_RETRY_COUNT 3U
 
 /* 两次TCP连接尝试之间的等待时间 */
 #define ESP8266_TCP_RETRY_INTERVAL_MS 1000U
+
+static volatile uint32_t EnvironmentSystemTimeMs;
+
+/**
+ * @brief 初始化TIM2，产生1ms系统时间基准
+ * @param None
+ * @retval None
+ */
+static void Environment_TimeBaseInit(void)
+{
+	TIM_TimeBaseInitTypeDef timerInit;
+	NVIC_InitTypeDef nvicInit;
+
+	/* APB1定时器时钟为72MHz，配置为1ms中断一次 */
+	RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+
+	TIM_TimeBaseStructInit(&timerInit);
+	timerInit.TIM_Prescaler = 72U - 1U;
+	timerInit.TIM_Period = 1000U - 1U;
+	timerInit.TIM_CounterMode = TIM_CounterMode_Up;
+	timerInit.TIM_ClockDivision = TIM_CKD_DIV1;
+
+	TIM_TimeBaseInit(TIM2, &timerInit);
+	TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+	TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+
+	nvicInit.NVIC_IRQChannel = TIM2_IRQn;
+	nvicInit.NVIC_IRQChannelPreemptionPriority = 2;
+	nvicInit.NVIC_IRQChannelSubPriority = 0;
+	nvicInit.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&nvicInit);
+
+	EnvironmentSystemTimeMs = 0U;
+	TIM_Cmd(TIM2, ENABLE);
+}
+
+/**
+ * @brief TIM2更新中断处理函数
+ * @param None
+ * @retval None
+ */
+void TIM2_IRQHandler(void)
+{
+	if(TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET)
+	{
+		TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+		EnvironmentSystemTimeMs++;
+	}
+}
 
 /**
  * @brief 计算载荷字符串的XOR校验和
@@ -162,6 +216,53 @@ static void Communication_SendAlarmCommand(uint8_t alarmActive)
 	sprintf(payload,"G1,ALARM=%u",(unsigned int)alarmActive);
 	
 	Communication_SendPayloadwithChecksum(payload);
+}
+
+/**
+ * @brief 生成本地环境数据TCP报文
+ * @param dataValid 本地DHT11数据是否有效
+ * @param temperature 本地温度
+ * @param humidity 本地湿度
+ * @param lightPercent 光照百分比
+ * @param alarmActive 本地温度报警状态
+ * @param errorCode DHT11错误码
+ * @param packet 输出的完整TCP报文
+ * @retval None
+ */
+static void Communication_BuildEnvironmentPacket(
+	uint8_t dataValid,
+	uint8_t temperature,
+	uint8_t humidity,
+	uint8_t lightPercent,
+	uint8_t alarmActive,
+	uint8_t errorCode,
+	char *packet)
+{
+	char payload[48];
+	uint8_t checksum;
+
+	if(dataValid == 1U)
+	{
+		sprintf(payload,
+		        "STM32,T=%u,H=%u,L=%u,ALARM=%u",
+		        (unsigned int)temperature,
+		        (unsigned int)humidity,
+		        (unsigned int)lightPercent,
+		        (unsigned int)alarmActive);
+	}
+	else
+	{
+		sprintf(payload,
+		        "STM32,DHT_ERR=%u",
+		        (unsigned int)errorCode);
+	}
+
+	checksum = Communication_CalculateChecksum(payload);
+
+	sprintf(packet,
+	        "@%s,C=%u\r\n",
+	        payload,
+	        (unsigned int)checksum);
 }
 
 /**
@@ -325,7 +426,12 @@ int main(void)
 	uint8_t localTemperature;
 	uint8_t localHumidity;
 	uint8_t localDhtErrorCode;
-	
+	uint8_t localDhtDataValid;
+
+	uint32_t tcpReportTimeMs;
+	uint8_t tcpAlarmStatus;
+	char tcpEnvironmentPacket[64];
+
 	uint8_t esp8266Status;
 	uint8_t esp8266ResetStatus;
 	uint8_t wifiConnectStatus;
@@ -340,6 +446,7 @@ int main(void)
 	LED_Init();
 	Buzzer_Init();
 	DHT11_Init();
+	Environment_TimeBaseInit();
 	
 	lightDisplayTimeMs = 100U;
 	
@@ -351,7 +458,12 @@ int main(void)
 	localTemperature = 0U;
 	localHumidity = 0U;
 	localDhtErrorCode = 0U;
-	
+	localDhtDataValid = 0U;
+
+	tcpReportTimeMs = 0U;
+	tcpAlarmStatus = 0U;
+	tcpEnvironmentPacket[0] = '\0';
+
 	Environment_DispalyStaticText();
 	
 	/*
@@ -433,6 +545,9 @@ int main(void)
 		 OLED_ShowString(4,1,"TCP SEND ERR    ");
 	 }
 	
+	 /* 从网络初始化完成后开始计算环境数据上报周期 */
+	tcpReportTimeMs = EnvironmentSystemTimeMs;
+	 
 	/* 初始为离线状态，直到接收到节点有效数据包 */
 	nodeOfflineTimeMs = NODE_OFFLINE_TIMEOUT_MS;
 	
@@ -472,6 +587,16 @@ int main(void)
 			
 			if(localDhtErrorCode == 0U)
 			{
+				localDhtDataValid = 1U;
+
+				if(localTemperature >= TEMPERATURE_ALARM_THRESHOLD)
+				{
+					tcpAlarmStatus = 1U;
+				}
+				else
+				{
+					tcpAlarmStatus = 0U;
+				}
 				// 读取成功：第4行显示本地温湿度
 				OLED_ShowString(4, 1, "LOCAL T:");
 				OLED_ShowNum(4, 9, localTemperature, 2);
@@ -480,6 +605,7 @@ int main(void)
 			}
 			else
 			{
+				localDhtDataValid = 0U;
 				/* 先清空整行，避免残留字符覆盖错误码 */
 				OLED_ShowString(4, 1, "                ");
 				
@@ -493,6 +619,26 @@ int main(void)
 			localDhtReadTimeMs += MAIN_LOOP_INTERVAL_MS;
 		}
 		
+		if((uint32_t)(EnvironmentSystemTimeMs - tcpReportTimeMs)
+			>= TCP_ENVIRONMENT_REPORT_INTERVAL_MS)
+		{
+			tcpReportTimeMs = EnvironmentSystemTimeMs;
+
+			if(tcpConnectStatus == 1U)
+			{
+				Communication_BuildEnvironmentPacket(
+					localDhtDataValid,
+					localTemperature,
+					localHumidity,
+					lightPercent,
+					tcpAlarmStatus,
+					localDhtErrorCode,
+					tcpEnvironmentPacket);
+
+				tcpSendStatus = ESP8266_SendTcpData(
+					tcpEnvironmentPacket);
+			}
+		}
 		if(lightDisplayTimeMs >= 100U)// 定时100ms更新一次光照百分比显示，避免频繁读取ADC和刷屏
 		{
 			// 读取光照传感器换算后的百分比(0‑100)

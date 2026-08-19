@@ -280,7 +280,7 @@ unsigned char ESP8266_SendTcpData(const char *data)
 	 * 等待ESP8266返回发送提示符。
 	 * 收到提示符后稍作等待，确保模块已经进入数据发送状态。
 	 */
-	if(ESP8266_waitResponse(">",5000U) == 0U)
+	if(ESP8266_waitResponse(">",1000U) == 0U)
 	{
 		return 0U;
 	}
