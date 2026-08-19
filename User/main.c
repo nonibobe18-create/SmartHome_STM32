@@ -10,6 +10,7 @@
 #include "DHT11.h"
 #include "LightSensor.h"
 #include "ESP8266.h"
+#include "NetworkConfig.h"
 
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
@@ -22,6 +23,12 @@
 
 /* 本地DHT11读取周期 */
 #define LOCAL_DHT11_READ_INTERVAL_MS 2000U
+
+/* TCP服务器连接失败后的最大重试次数 */
+#define ESP8266_TCP_RETRY_COUNT 3U
+
+/* 两次TCP连接尝试之间的等待时间 */
+#define ESP8266_TCP_RETRY_INTERVAL_MS 1000U
 
 /**
  * @brief 计算载荷字符串的XOR校验和
@@ -320,7 +327,11 @@ int main(void)
 	uint8_t localDhtErrorCode;
 	
 	uint8_t esp8266Status;
+	uint8_t esp8266ResetStatus;
 	uint8_t wifiConnectStatus;
+	uint8_t tcpConnectStatus;
+	uint8_t tcpSendStatus;
+	uint8_t tcpRetryCount;
 	
 	LightSensor_Init();
 	OLED_Init();
@@ -343,38 +354,84 @@ int main(void)
 	
 	Environment_DispalyStaticText();
 	
-	/* 测试STM32与ESP8266之间的USART2通信 */
-	esp8266Status = ESP8266_TestConnection(3000U);
-	
-	if(esp8266Status == 1U)
-	{
-		wifiConnectStatus = ESP8266_ConnectWiFi();
-	}
-	else
-	{
-		wifiConnectStatus = 0U;
-	}
-	
 	/*
-	 * 仅在启动时显示WiFi连接结果。
-	 * 约2秒后，第4行会由本地DHT11显示覆盖。
+	 * ESP8266只执行一次复位、AT检测和WiFi入网。
+	 * WiFi成功后，只对TCP服务器连接进行有限次数重试。
 	 */
-	if(wifiConnectStatus == 1U)
+	esp8266ResetStatus = 0U;
+	esp8266Status = 0U;
+	wifiConnectStatus = 0U;
+	tcpConnectStatus = 0U;
+	tcpSendStatus = 0U;
+
+	Delay_ms(2000U);
+	
+	esp8266ResetStatus = ESP8266_Reset();
+	
+	if(esp8266ResetStatus == 1U)
 	{
-		OLED_ShowString(4,1,"WIFI JOIN OK    ");
+		esp8266Status = ESP8266_TestConnection(5000U);
+
+		if(esp8266Status == 1U)
+		{
+			wifiConnectStatus = ESP8266_ConnectWiFi();
+
+			if(wifiConnectStatus == 1U)
+			{
+				for(tcpRetryCount = 0U;
+					tcpRetryCount < ESP8266_TCP_RETRY_COUNT;
+					tcpRetryCount++)
+				{
+					tcpConnectStatus = ESP8266_ConnectTcpServer(
+						TCP_SERVER_IP,
+						TCP_SERVER_PORT);
+
+					if(tcpConnectStatus == 1U)
+					{
+						tcpSendStatus = ESP8266_SendTcpData(
+							"@STM32,TCP=OK\r\n");
+
+						if(tcpSendStatus == 1U)
+						{
+							break;
+						}
+					}
+
+					Delay_ms(ESP8266_TCP_RETRY_INTERVAL_MS);
+				}
+			}
+		}
 	}
-	else if(wifiConnectStatus == 2U)
+	 
+	 /* 根据最终结果显示启动网络状态 */
+	 if(tcpSendStatus == 1U)
+	 {
+		 OLED_ShowString(4,1,"TCP SEND OK     ");
+	 }
+	 else if(wifiConnectStatus == 2U)
 	{
-		OLED_ShowString(4,1,"WIFI MODE ERR   ");
+		OLED_ShowString(4, 1, "WIFI MODE ERR   ");
 	}
 	else if(wifiConnectStatus == 3U)
 	{
-		OLED_ShowString(4,1,"WIFI JOIN ERR   ");
+		OLED_ShowString(4, 1, "WIFI JOIN ERR   ");
 	}
-	else
+	else if(esp8266ResetStatus == 0U)
 	{
-		OLED_ShowString(4,1,"WIFI AT ERR     ");
+		OLED_ShowString(4, 1, "WIFI RST ERR    ");
 	}
+	else if(esp8266Status == 0U)
+	{
+		OLED_ShowString(4, 1, "WIFI AT ERR     ");
+	}
+	 else if(tcpConnectStatus == 0U)
+	 {
+		 OLED_ShowString(4,1,"TCP CONN ERR    ");
+	 }
+	 else
+	 {
+		 OLED_ShowString(4,1,"TCP SEND ERR    ");
+	 }
 	
 	/* 初始为离线状态，直到接收到节点有效数据包 */
 	nodeOfflineTimeMs = NODE_OFFLINE_TIMEOUT_MS;
