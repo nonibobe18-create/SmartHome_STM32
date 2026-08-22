@@ -26,8 +26,21 @@
 /* 本地DHT11读取周期 */
 #define LOCAL_DHT11_READ_INTERVAL_MS 2000U
 
+/* DHT11单次读取失败后的重试配置 */
+#define LOCAL_DHT11_RETRY_COUNT 3U
+#define LOCAL_DHT11_RETRY_INTERVAL_MS 100U
+#define LOCAL_DHT11_FAIL_LIMIT 3U
+
 /* 本地环境数据TCP上报周期 */
 #define TCP_ENVIRONMENT_REPORT_INTERVAL_MS 5000U
+
+/* 光照自动窗帘的滞回阈值 */
+#define CURTAIN_LIGHT_OPEN_THRESHOLD  30U
+#define CURTAIN_LIGHT_CLOSE_THRESHOLD 70U
+
+#define CURTAIN_AUTO_UNKNOWN 0U
+#define CURTAIN_AUTO_OPEN    1U
+#define CURTAIN_AUTO_CLOSE   2U
 
 /* TCP服务器连接失败后的最大重试次数 */
 #define ESP8266_TCP_RETRY_COUNT 3U
@@ -91,20 +104,20 @@ void TIM2_IRQHandler(void)
  */
 static uint8_t Communication_CalculateChecksum(const char *text)
 {
- uint8_t checksum;
- uint16_t index;
- 
- checksum = 0;
- index = 0;
- 
- // 遍历直到字符串结束符'\0'
- while(text[index] != '\0')
- {
-	 checksum ^= (uint8_t)text[index];
-	 index ++;
- }
- 
- return checksum;
+	 uint8_t checksum;
+	 uint16_t index;
+	 
+	 checksum = 0;
+	 index = 0;
+	 
+	 // 遍历直到字符串结束符'\0'
+	 while(text[index] != '\0')
+	 {
+		 checksum ^= (uint8_t)text[index];
+		 index ++;
+	 }
+	 
+	 return checksum;
 }
 
 /**
@@ -114,11 +127,11 @@ static uint8_t Communication_CalculateChecksum(const char *text)
 */
 static uint8_t Communication_CalculatePacketChecksum(const char*packet)
 {
- uint8_t checksum;
- uint16_t index;
- 
- checksum = 0;
- index = 0;
+	 uint8_t checksum;
+	 uint16_t index;
+	 
+	 checksum = 0;
+	 index = 0;
  
  while(packet[index] != '\0')
  {
@@ -142,15 +155,15 @@ static uint8_t Communication_CalculatePacketChecksum(const char*packet)
 */
 static void Communication_SendPayloadwithChecksum(const char *payload)
 {
- uint8_t checksum;
- char frame[32];
- 
- checksum = Communication_CalculateChecksum(payload);
- 
- // 组装完整帧：@载荷,C=校验\r\n
- sprintf(frame,"@%s,C=%u\r\n",payload,(unsigned int)checksum);
- 
- Serial_SendString(frame);
+	 uint8_t checksum;
+	 char frame[32];
+	 
+	 checksum = Communication_CalculateChecksum(payload);
+	 
+	 // 组装完整帧：@载荷,C=校验\r\n
+	 sprintf(frame,"@%s,C=%u\r\n",payload,(unsigned int)checksum);
+	 
+	 Serial_SendString(frame);
 }
  
 /**
@@ -426,6 +439,45 @@ static uint8_t Communication_ProcessReceivePacket(void)
 }
 
 /**
+ * @brief 带有限重试次数的本地DHT11读取
+ * @param temperature 输出参数，温度（摄氏度）
+ * @param humidity    输出参数，相对湿度（百分比）
+ * @retval 0 读取成功；否则返回最后一次DHT11的错误码
+ */
+static uint8_t App_ReadLocalDht11WithRetry(uint8_t *temperature,
+                                           uint8_t *humidity)
+{
+    uint8_t retryIndex;        // 重试计数器
+    uint8_t readStatus;       // DHT11读取状态
+
+    readStatus = 1U;          // 初始化为错误状态
+
+    // 循环：最多重试 LOCAL_DHT11_RETRY_COUNT 次
+    for (retryIndex = 0U;
+         retryIndex < LOCAL_DHT11_RETRY_COUNT;
+         retryIndex++)
+    {
+        // 调用底层接口读取温湿度
+        readStatus = DHT11_ReadData(temperature, humidity);
+
+        if (readStatus == 0U)
+        {
+            return 0U;         // 读取成功，直接返回0，结束函数
+        }
+
+        // 不是最后一次重试，则延时后再尝试
+        if ((retryIndex + 1U) < LOCAL_DHT11_RETRY_COUNT)
+        {
+            Delay_ms(LOCAL_DHT11_RETRY_INTERVAL_MS);
+        }
+    }
+
+    // 全部重试都失败，返回最后一次的错误码
+    return readStatus;
+}
+
+
+/**
  * @brief  STM32网关主函数入口
  * @param  None
  * @retval 不会返回
@@ -438,6 +490,8 @@ int main(void)
 	
 	uint8_t keyNum;
 	
+	uint8_t curtainAutoState;
+	
 	uint32_t lightDisplayTimeMs;
     uint8_t lightPercent;
 	
@@ -447,6 +501,7 @@ int main(void)
 	uint8_t localHumidity;
 	uint8_t localDhtErrorCode;
 	uint8_t localDhtDataValid;
+	uint8_t localDhtFailCount;
 
 	uint32_t tcpReportTimeMs;
 	uint8_t tcpAlarmStatus;
@@ -480,10 +535,13 @@ int main(void)
 	localHumidity = 0U;
 	localDhtErrorCode = 0U;
 	localDhtDataValid = 0U;
+	localDhtFailCount = 0U;
 
 	tcpReportTimeMs = 0U;
 	tcpAlarmStatus = 0U;
 	tcpEnvironmentPacket[0] = '\0';
+	
+	curtainAutoState = CURTAIN_AUTO_UNKNOWN;
 
 	Environment_DispalyStaticText();
 	
@@ -584,11 +642,13 @@ int main(void)
 		if(keyNum == 1U)
 		{
 			Communication_SendCurtainCommand("OPEN");
+			curtainAutoState = CURTAIN_AUTO_OPEN;
 			OLED_ShowString(4,1,"CURTAIN OPEN   ");
 		}
 		else if(keyNum == 2U)
 		{
 			Communication_SendCurtainCommand("CLOSE");
+			curtainAutoState = CURTAIN_AUTO_CLOSE;
 			OLED_ShowString(4,1,"CURTAIN CLOSE  ");
 		}
 		
@@ -622,11 +682,13 @@ int main(void)
 			localDhtReadTimeMs = 0U;
 			
 			// 读取本地DHT11，保存错误码，0=成功，非0代表不同类型故障
-			localDhtErrorCode = DHT11_ReadData(&localTemperature, &localHumidity);
+			localDhtErrorCode =App_ReadLocalDht11WithRetry(&localTemperature,&localHumidity);
 			
 			if(localDhtErrorCode == 0U)
 			{
 				localDhtDataValid = 1U;
+				
+				localDhtFailCount = 0U;
 
 				if(localTemperature >= TEMPERATURE_ALARM_THRESHOLD)
 				{
@@ -644,13 +706,34 @@ int main(void)
 			}
 			else
 			{
-				localDhtDataValid = 0U;
-				/* 先清空整行，避免残留字符覆盖错误码 */
-				OLED_ShowString(4, 1, "                ");
-				
-				// 读取失败：显示错误代号，同时用空格清除右侧旧湿度数字残留
-				OLED_ShowString(4, 1, "LOCAL ERR:");
-				OLED_ShowNum(4, 12, localDhtErrorCode, 1);
+				if (localDhtFailCount < LOCAL_DHT11_FAIL_LIMIT)
+				{
+					localDhtFailCount++;
+				}
+
+				/*
+				 * A single failed read is treated as a transient error.
+				 * Only consecutive failures invalidate the local data.
+				 */
+				if (localDhtFailCount < LOCAL_DHT11_FAIL_LIMIT)
+				{
+					OLED_ShowString(4, 1,
+									"LOCAL DHT RETRY ");
+				}
+				else
+				{
+					localDhtDataValid = 0U;
+
+					OLED_ShowString(4, 1,
+									"                ");
+
+					OLED_ShowString(4, 1,
+									"LOCAL ERR:");
+
+					OLED_ShowNum(4, 12,
+								 localDhtErrorCode,
+								 1);
+				}
 			}
 		}
 		else
@@ -678,14 +761,51 @@ int main(void)
 					tcpEnvironmentPacket);
 			}
 		}
-		if(lightDisplayTimeMs >= 100U)// 定时100ms更新一次光照百分比显示，避免频繁读取ADC和刷屏
+		if(lightDisplayTimeMs >= 100U)
 		{
-			// 读取光照传感器换算后的百分比(0‑100)
+			// 读取光照传感器，得到光照百分比 0~100
 			lightPercent = LightSensor_ReadPercent();
-			// OLED第2行，第14列，显示3位数字光照百分比
+			
+			// OLED显示光照百分比数值，3位数字
 			OLED_ShowNum(2,14,lightPercent,3);
-			//计时清零，重新开始计时
-			lightDisplayTimeMs = 0;
+			
+			/*
+			 * @brief 根据光照强度执行窗帘自动控制
+			 * @param 无
+			 * @retval 无
+			 * @note 强光关闭窗帘；弱光打开窗帘。
+			 *       传感器输出为反向特性：L数值越小，光照越强。
+			 */
+			// 光照百分比 ≤开窗帘阈值，且当前自动状态不是关闭
+			if ((lightPercent <= CURTAIN_LIGHT_OPEN_THRESHOLD) &&
+				(curtainAutoState != CURTAIN_AUTO_CLOSE))
+			{
+				/*
+				 * L<=30 代表光照很强
+				 * 关闭窗帘，减少强光直射与热量
+				 */
+				Communication_SendCurtainCommand("CLOSE");      // 发送关闭窗帘命令
+				curtainAutoState = CURTAIN_AUTO_CLOSE;          // 更新自动状态：自动关闭
+
+				OLED_ShowString(4, 1, "AUTO CURTAIN CL ");      // OLED显示自动关闭提示
+			}
+			// 光照百分比 ≥关窗帘阈值，且当前自动状态不是打开
+			else if ((lightPercent >= CURTAIN_LIGHT_CLOSE_THRESHOLD) &&
+					 (curtainAutoState != CURTAIN_AUTO_OPEN))
+			{
+				/*
+				 * L>=70 代表光照很弱
+				 * 打开窗帘，充分利用自然光
+				 */
+				Communication_SendCurtainCommand("OPEN");      // 发送打开窗帘命令
+				curtainAutoState = CURTAIN_AUTO_OPEN;           // 更新自动状态：自动打开
+
+				OLED_ShowString(4, 1, "AUTO CURTAIN OP ");      // OLED显示自动打开提示
+			}
+
+
+			
+			lightDisplayTimeMs = 0U;        // 计时清零，开启下一轮100ms计时
 		}
 		else
 		{
