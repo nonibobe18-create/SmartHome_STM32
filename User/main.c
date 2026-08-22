@@ -219,6 +219,24 @@ static void Communication_SendAlarmCommand(uint8_t alarmActive)
 }
 
 /**
+ * @brief 向51节点发送窗帘控制命令
+ * @param command 命令字符串：OPEN（打开）、CLOSE（关闭）、STOP（停止）
+ * @retval 无
+ */
+static void Communication_SendCurtainCommand(const char *command)
+{
+	char payload[24];    //定义数组，存放待发送不带校验和的命令载荷
+	
+	//格式化组装协议内容，例如：G1,CURTAIN=OPEN
+	sprintf(payload,
+	        "G1,CURTAIN=%s",
+	        command);
+	
+	//追加校验和，完成组帧并通过串口发送出去
+	Communication_SendPayloadwithChecksum(payload);
+}
+
+/**
  * @brief 生成本地环境数据TCP报文
  * @param dataValid 本地DHT11数据是否有效
  * @param temperature 本地温度
@@ -418,6 +436,8 @@ int main(void)
 	uint32_t nodeOfflineTimeMs;
     uint8_t packetValid;
 	
+	uint8_t keyNum;
+	
 	uint32_t lightDisplayTimeMs;
     uint8_t lightPercent;
 	
@@ -446,6 +466,7 @@ int main(void)
 	LED_Init();
 	Buzzer_Init();
 	DHT11_Init();
+	Key_Init();
 	Environment_TimeBaseInit();
 	
 	lightDisplayTimeMs = 100U;
@@ -553,6 +574,24 @@ int main(void)
 	
 	while(1)
 	{
+		/*
+		 * @brief 读取STM32本地按键，并发送窗帘控制命令
+		 * @param 无
+		 * @retval 无
+		 */
+		keyNum = Key_GetNum();                   // 获取按键编号，1代表按键1按下，2代表按键2按下
+		
+		if(keyNum == 1U)
+		{
+			Communication_SendCurtainCommand("OPEN");
+			OLED_ShowString(4,1,"CURTAIN OPEN   ");
+		}
+		else if(keyNum == 2U)
+		{
+			Communication_SendCurtainCommand("CLOSE");
+			OLED_ShowString(4,1,"CURTAIN CLOSE  ");
+		}
+		
 			/* 处理来自51节点的一整包接收数据 */
 		packetValid = Communication_ProcessReceivePacket();
 
