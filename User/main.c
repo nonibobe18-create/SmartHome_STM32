@@ -13,6 +13,7 @@
 #include "NetworkConfig.h"
 #include "stm32f10x_tim.h"
 #include "misc.h"
+#include "MQ2.h"
 
 /*温度报警阈值*/
 #define TEMPERATURE_ALARM_THRESHOLD 30U
@@ -48,7 +49,17 @@
 /* 两次TCP连接尝试之间的等待时间 */
 #define ESP8266_TCP_RETRY_INTERVAL_MS 1000U
 
+/* MQ-2 sampling and alarm parameters */
+#define MQ2_READ_INTERVAL_MS       500U    // MQ‑2采样周期，500ms读取一次ADC
+#define MQ2_SAMPLE_COUNT           8U      // 滑动采样点数，取平均，抑制ADC噪声
+#define MQ2_ALARM_ON_THRESHOLD     1600U   // 报警开启阈值；ADC＞1600，满足报警条件
+#define MQ2_ALARM_OFF_THRESHOLD    1200U   // 报警关闭阈值；ADC＜1200，解除报警
+#define MQ2_CONFIRM_COUNT          3U      // 确认计数；连续N次满足条件才切换报警状态，防误触发
+
 static volatile uint32_t EnvironmentSystemTimeMs;
+
+static uint8_t RemoteTemperatureAlarmActive;
+static uint8_t SmokeAlarmActive;
 
 /**
  * @brief 初始化TIM2，产生1ms系统时间基准
@@ -184,6 +195,28 @@ static void Environment_DispalyStaticText(void)
 }
 
 /**
+ * @brief 根据所有报警源状态更新本地LED与蜂鸣器输出
+ * @param 无
+ * @retval 无
+ */
+static void Environment_UpdateAlarmOutput(void)
+{
+    // 远程温度报警 或者 烟雾报警任意一个激活，触发声光报警
+    if ((RemoteTemperatureAlarmActive != 0U) ||
+        (SmokeAlarmActive != 0U))
+    {
+        LED1_ON();        // 报警LED点亮
+        Buzzer_On();      // 蜂鸣器开启
+    }
+    else
+    {
+        LED1_OFF();       // 全部报警清除，LED熄灭
+        Buzzer_Off();     // 关闭蜂鸣器
+    }
+}
+
+
+/**
 *@brief  刷新OLED环境数据显示，同时执行温度报警逻辑
 *@param  temperature：采集得到的温度
 *@param  humidity：采集得到的相对湿度
@@ -191,7 +224,7 @@ static void Environment_DispalyStaticText(void)
 */
 static uint8_t Environment_Update(uint8_t temperature, uint8_t humidity)
 {
-	uint8_t alarmActive = 0;              //报警状态标志，初始为0（无警报）
+	uint8_t alarmActive = 0U;              //报警状态标志，初始为0（无警报）
 	
 	OLED_ShowNum(1,7,temperature,2);     
     OLED_ShowString(1,10,"C");
@@ -202,17 +235,17 @@ static uint8_t Environment_Update(uint8_t temperature, uint8_t humidity)
 	//判断温度是否大于等于报警阈值
 	if(temperature >= TEMPERATURE_ALARM_THRESHOLD)
 	{
-		LED1_ON();
-		Buzzer_On();
-		OLED_ShowString(3,1,"State:TEMP HIGH ");
+		RemoteTemperatureAlarmActive = 1U;
 		alarmActive = 1U;
+		OLED_ShowString(3,1,"State:TEMP HIGH ");
 	}
 	else
 	{
-		LED1_OFF();
-		Buzzer_Off();
+		RemoteTemperatureAlarmActive = 0U;
 		OLED_ShowString(3,1,"State:NORMAL    ");
 	}
+	
+	Environment_UpdateAlarmOutput();
 	
 	return alarmActive;                  //返回当前报警状态给调用者
 }
@@ -383,7 +416,6 @@ static uint8_t Communication_ProcessReceivePacket(void)
 {
 	uint8_t temperature;
 	uint8_t humidity;
-	uint8_t alarmActive;
 	uint8_t sensorErrorCode;
 	
 	if(Serial_RxFlag == 0)
@@ -393,11 +425,12 @@ static uint8_t Communication_ProcessReceivePacket(void)
 	
 	if(Communication_ParseNodePacket(&temperature, &humidity) == 1)
 	{
-		/* 刷新显示，并取得当前温度报警状态。 */
-		alarmActive = Environment_Update(temperature, humidity);
+		/* 刷新显示，并更新温度报警状态。 */
+		Environment_Update(temperature, humidity);
 		
 		/* 将报警状态回传给51节点。 */
-		Communication_SendAlarmCommand(alarmActive);
+		Communication_SendAlarmCommand((RemoteTemperatureAlarmActive != 0U) ||
+                                       (SmokeAlarmActive != 0U));
 		
 //		OLED_ShowString(4,1,"NODE:N1 OK      ");
 		
@@ -514,7 +547,13 @@ int main(void)
 	uint8_t tcpSendStatus;
 	uint8_t tcpRetryCount;
 	
+	uint32_t mq2ReadTimeMs;
+	uint16_t mq2AverageRaw;
+	uint8_t smokeAlarmOnCount;
+	uint8_t smokeAlarmOffCount;
+	
 	LightSensor_Init();
+	MQ2_Init();
 	OLED_Init();
 	Serial_Init();
 	ESP8266_Init();
@@ -536,10 +575,18 @@ int main(void)
 	localDhtErrorCode = 0U;
 	localDhtDataValid = 0U;
 	localDhtFailCount = 0U;
+	
+	mq2ReadTimeMs = MQ2_READ_INTERVAL_MS;
+	mq2AverageRaw = 0U;
+	SmokeAlarmActive = 0U;
+	smokeAlarmOnCount = 0U;
+	smokeAlarmOffCount = 0U;
 
 	tcpReportTimeMs = 0U;
 	tcpAlarmStatus = 0U;
 	tcpEnvironmentPacket[0] = '\0';
+	
+	RemoteTemperatureAlarmActive = 0U;
 	
 	curtainAutoState = CURTAIN_AUTO_UNKNOWN;
 
@@ -811,6 +858,74 @@ int main(void)
 		{
 			//主循环周期累加时间
 			lightDisplayTimeMs += MAIN_LOOP_INTERVAL_MS;
+		}
+		
+		/*
+		 * @brief 读取MQ‑2并更新烟雾报警状态
+		 * @param 无
+		 * @retval 无
+		 */
+		if(mq2ReadTimeMs >= MQ2_READ_INTERVAL_MS)
+		{
+			mq2ReadTimeMs = 0U;
+			
+			mq2AverageRaw = MQ2_ReadAverage(MQ2_SAMPLE_COUNT);
+			
+			if(SmokeAlarmActive == 0U)          // 当前状态：正常
+			{
+				smokeAlarmOffCount = 0U;
+				
+				if(mq2AverageRaw >= MQ2_ALARM_ON_THRESHOLD)
+				{
+					if(smokeAlarmOnCount < MQ2_CONFIRM_COUNT)
+					{
+						smokeAlarmOnCount ++;    // 超标，累加报警确认计数
+					}
+					
+					if(smokeAlarmOnCount >= MQ2_CONFIRM_COUNT)
+					{
+						SmokeAlarmActive = 1U;        // 触发烟雾报警
+						smokeAlarmOnCount = 0U;
+						
+						Environment_UpdateAlarmOutput();
+
+                        Communication_SendAlarmCommand(1U);
+					}
+				}
+				else
+				{
+					smokeAlarmOnCount = 0U;      // 未超标，计数器清零
+					
+				}
+			}
+			else                           // 当前状态：已经报警
+			{
+				smokeAlarmOnCount = 0U;
+				
+				if(mq2AverageRaw <= MQ2_ALARM_OFF_THRESHOLD)
+				{
+					if(smokeAlarmOffCount < MQ2_CONFIRM_COUNT)
+					{
+						smokeAlarmOffCount ++;        // 低于解除阈值，累加解除计数
+					}
+					
+					if(smokeAlarmOffCount >= MQ2_CONFIRM_COUNT)
+					{
+						SmokeAlarmActive = 0U;             // 解除报警
+						smokeAlarmOffCount = 0U;
+						
+						Environment_UpdateAlarmOutput();
+
+						Communication_SendAlarmCommand((RemoteTemperatureAlarmActive != 0U));
+					}
+				}
+				
+				// else：仍然高于关闭阈值，保持报警状态，不做处理
+			}
+		}
+		else
+		{
+			mq2ReadTimeMs += MAIN_LOOP_INTERVAL_MS;   //计时累加
 		}
 		
 		Delay_ms(MAIN_LOOP_INTERVAL_MS);
