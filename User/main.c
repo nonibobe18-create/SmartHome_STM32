@@ -441,12 +441,14 @@ static uint8_t Communication_ProcessReceivePacket(void)
 	}
 	else if(Communication_ParseNodeErrorPacket(&sensorErrorCode) == 1)
 	{
-		/* 节点在线，但DHT11传感器读取失败 */
-		LED1_ON();
-		Buzzer_On();
-		
-		/* 清除远端节点上原有的温度报警 */
-		Communication_SendAlarmCommand(0);
+		/*
+		 * @brief 清除远程温度报警，但保留本地烟雾报警状态
+		 */
+		RemoteTemperatureAlarmActive = 0U;
+		Environment_UpdateAlarmOutput();
+
+		/* 将本地MQ-2报警状态同步给51节点 */
+		Communication_SendAlarmCommand((SmokeAlarmActive != 0U));
 		
 		OLED_ShowString(3,1,"State:DHT ERR   ");
 		OLED_ShowNum(3,15,sensorErrorCode,1);
@@ -715,9 +717,12 @@ int main(void)
 
 		if (nodeOfflineTimeMs >= NODE_OFFLINE_TIMEOUT_MS)
 		{
-			/* 节点离线，关闭报警LED */
-			LED1_OFF();
-			Buzzer_Off();
+			/*
+			 * @brief 节点离线时清除远程温度报警
+			 *        但不能影响本地MQ-2烟雾报警。
+			 */
+			RemoteTemperatureAlarmActive = 0U;
+			Environment_UpdateAlarmOutput();
 
 			OLED_ShowString(3, 1, "State:OFFLINE   ");
 //			OLED_ShowString(4, 1, "NODE:N1 OFFLINE ");
