@@ -387,13 +387,13 @@ static uint8_t Communication_ParseNodeErrorPacket(uint8_t *errorCode)
 	parseResult = sscanf(Serial_RxPacket,"N1,ERROR=%u,C=%u",&parsedErrorCode,&parsedChecksum);
 	
 	/*
-+- * 合法性校验条件，任意一条满足则报文无效，返回0
-+- * 1.parseResult !=2：sscanf未能成功读出2个字段，报文格式错误
-+- * 2.parsedErrorCode <1U：错误码小于1，不在定义范围
-+- * 3.parsedErrorCode >6U：错误码大于6，超出业务规定的错误编号(1~6)
-+- * 4.parsedChecksum >255U：XOR校验是8位，不能超过0‑255
-+- * 5.本地重新计算报文,C=之前载荷的XOR校验，和接收校验值比对不相等，说明传输出错
-+- */
+	 * 合法性校验条件，任意一条满足则报文无效，返回0
+	 * 1.parseResult !=2：sscanf未能成功读出2个字段，报文格式错误
+	 * 2.parsedErrorCode <1U：错误码小于1，不在定义范围
+	 * 3.parsedErrorCode >6U：错误码大于6，超出业务规定的错误编号(1~6)
+	 * 4.parsedChecksum >255U：XOR校验是8位，不能超过0‑255
+	 * 5.本地重新计算报文,C=之前载荷的XOR校验，和接收校验值比对不相等，说明传输出错
+	 */
 	if((parseResult != 2) ||
 		(parsedErrorCode < 1U) ||
      	(parsedErrorCode > 6U) ||
