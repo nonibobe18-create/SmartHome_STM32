@@ -49,6 +49,9 @@
 /* 两次TCP连接尝试之间的等待时间 */
 #define ESP8266_TCP_RETRY_INTERVAL_MS 1000U
 
+/* 网络断线后的下一次重连间隔 */
+#define ESP8266_RECONNECT_INTERVAL_MS 10000U
+
 /* MQ-2 sampling and alarm parameters */
 #define MQ2_READ_INTERVAL_MS       500U    // MQ‑2采样周期，500ms读取一次ADC
 #define MQ2_SAMPLE_COUNT           8U      // 滑动采样点数，取平均，抑制ADC噪声
@@ -384,13 +387,13 @@ static uint8_t Communication_ParseNodeErrorPacket(uint8_t *errorCode)
 	parseResult = sscanf(Serial_RxPacket,"N1,ERROR=%u,C=%u",&parsedErrorCode,&parsedChecksum);
 	
 	/*
- * 合法性校验条件，任意一条满足则报文无效，返回0
- * 1.parseResult !=2：sscanf未能成功读出2个字段，报文格式错误
- * 2.parsedErrorCode <1U：错误码小于1，不在定义范围
- * 3.parsedErrorCode >6U：错误码大于6，超出业务规定的错误编号(1~6)
- * 4.parsedChecksum >255U：XOR校验是8位，不能超过0‑255
- * 5.本地重新计算报文,C=之前载荷的XOR校验，和接收校验值比对不相等，说明传输出错
- */
+	 * 合法性校验条件，任意一条满足则报文无效，返回0
+	 * 1.parseResult !=2：sscanf未能成功读出2个字段，报文格式错误
+	 * 2.parsedErrorCode <1U：错误码小于1，不在定义范围
+	 * 3.parsedErrorCode >6U：错误码大于6，超出业务规定的错误编号(1~6)
+	 * 4.parsedChecksum >255U：XOR校验是8位，不能超过0‑255
+	 * 5.本地重新计算报文,C=之前载荷的XOR校验，和接收校验值比对不相等，说明传输出错
+	 */
 	if((parseResult != 2) ||
 		(parsedErrorCode < 1U) ||
      	(parsedErrorCode > 6U) ||
@@ -548,7 +551,7 @@ int main(void)
 	uint8_t tcpConnectStatus;
 	uint8_t tcpSendStatus;
 	uint8_t tcpRetryCount;
-	
+	uint32_t esp8266ReconnectTimeMs;
 	uint32_t mq2ReadTimeMs;
 	uint16_t mq2AverageRaw;
 	uint8_t smokeAlarmOnCount;
@@ -603,7 +606,8 @@ int main(void)
 	wifiConnectStatus = 0U;
 	tcpConnectStatus = 0U;
 	tcpSendStatus = 0U;
-
+	/* 允许主循环启动后按周期检查网络重连 */
+	esp8266ReconnectTimeMs = EnvironmentSystemTimeMs;
 	Delay_ms(2000U);
 	
 	esp8266ResetStatus = ESP8266_Reset();
@@ -793,6 +797,52 @@ int main(void)
 			localDhtReadTimeMs += MAIN_LOOP_INTERVAL_MS;
 		}
 		
+		/*
+		 * @brief 检测TCP断线并周期性恢复WiFi和TCP连接
+		 * @param 无
+		 * @retval 无
+		 * @note 每10秒最多执行一次重连尝试，避免阻塞主循环。
+		 */
+		if ((tcpConnectStatus == 0U) &&
+			((uint32_t)(EnvironmentSystemTimeMs - esp8266ReconnectTimeMs)
+			 >= ESP8266_RECONNECT_INTERVAL_MS))
+		{
+			esp8266ReconnectTimeMs = EnvironmentSystemTimeMs;
+
+			/*
+			 * WiFi状态无效时重新执行入网。
+			 * ESP8266_ConnectWiFi内部具有最大超时时间。
+			 */
+			if (wifiConnectStatus != 1U)
+			{
+				wifiConnectStatus = ESP8266_ConnectWiFi();
+			}
+
+			if (wifiConnectStatus == 1U)
+			{
+				tcpConnectStatus = ESP8266_ConnectTcpServer(
+					TCP_SERVER_IP,
+					TCP_SERVER_PORT);
+
+				if (tcpConnectStatus == 1U)
+				{
+					tcpSendStatus = ESP8266_SendTcpData(
+						"@STM32,TCP=RECONNECT\r\n");
+
+					if (tcpSendStatus != 1U)
+					{
+						tcpConnectStatus = 0U;
+					}
+				}
+				else
+				{
+					/*
+					 * TCP连接失败，下一次重连周期重新检查WiFi。
+					 */
+					wifiConnectStatus = 0U;
+				}
+			}
+		}
 		if((uint32_t)(EnvironmentSystemTimeMs - tcpReportTimeMs)
 			>= TCP_ENVIRONMENT_REPORT_INTERVAL_MS)
 		{
@@ -811,6 +861,14 @@ int main(void)
 
 				tcpSendStatus = ESP8266_SendTcpData(
 					tcpEnvironmentPacket);
+				if (tcpSendStatus != 1U)
+				{
+					/*
+					 * 发送失败表示当前TCP连接不可用，
+					 * 下一次重连周期重新建立连接。
+					 */
+					tcpConnectStatus = 0U;
+				}
 			}
 		}
 		if(lightDisplayTimeMs >= 100U)
@@ -933,6 +991,17 @@ int main(void)
 			mq2ReadTimeMs += MAIN_LOOP_INTERVAL_MS;   //计时累加
 		}
 		
+		/*
+		 * @brief 显示当前网络状态
+		 * @param 无
+		 * @retval 无
+		 * @note TCP断开时优先显示TCP OFFLINE，
+		 *       不把TCP服务器断开误判为WiFi断开。
+		 */
+		if (tcpConnectStatus == 0U)
+		{
+			OLED_ShowString(4, 1, "TCP OFFLINE     ");
+		}
 		Delay_ms(MAIN_LOOP_INTERVAL_MS);
 	}
 }
